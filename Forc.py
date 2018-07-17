@@ -47,23 +47,7 @@ class ForcBase(abc.ABC):
         return
 
 
-# spec = [('_h_min ', nb.float32),
-#         ('_h_max ', nb.float32),
-#         ('_hr_min', nb.float32),
-#         ('_hr_max', nb.float32),
-#         ('_m_min ', nb.float32),
-#         ('_m_max ', nb.float32),
-#         ('_T_min ', nb.float32),
-#         ('_T_max ', nb.float32),
-#         ('h', nb.float32[:]),
-#         ('hr', nb.float32[:]),
-#         ('m', nb.float32[:]),
-#         ('rho', nb.float32[:]),
-#         ('temperature', nb.float32[:]),
-#         ('rho_uncertainty', nb.float32[:]),
-#         ('step', nb.float32)]
-# @nb.jitclass(spec)
-class PMCForc(ForcBase):
+class PMCForc():
     """FORC class for PMC-formatted data. See the PMC format spec for more info. Magnetization (and, if present,
     temperature) data is optionally drift corrected upon instantiation before being interpolated on a
     uniform grid in (H, H_r) space.
@@ -333,6 +317,14 @@ class PMCForc(ForcBase):
         return np.mean(step_sizes)
 
     def _interpolate(self, method='cubic'):
+        """Interpolate the dataset in (H, Hr) space. See documentation for scipy.optimize.griddata for more info.
+
+        method : str, optional
+            Interpolation method, used as parameter for scipy.optimize.griddata.
+            (the default is 'cubic', which is usually well behaved for evenly spaced data points, but can result
+            in spikes in the interpolated data for irregularly spaced data. Use 'linear' if this is the case.)
+
+        """
 
         # Determine min and max values of (h, hr) from raw input lists for interpolation.
         h_min = self.h[0][0]
@@ -468,9 +460,9 @@ class PMCForc(ForcBase):
         self.m = np.concatenate((h_extend*np.nan, self.m), axis=1)
 
         if method == 'flat':
-            self._extend_flat(self.h, self.m)
+            util.extend_flat(self.h, self.m)
         elif method == 'slope':
-            self._extend_slope(self.h, self.m, n_fit_points)
+            util.extend_slope(self.h, self.m, n_fit_points)
         else:
             raise NotImplementedError
 
@@ -483,27 +475,6 @@ class PMCForc(ForcBase):
 
         return
 
-    @classmethod
-    def _compute_forc_sg(cls, m, sf, step_x, step_y):
-        kernel = cls._sg_kernel(sf, step_x, step_y)
-        # return snf.convolve(m, kernel, mode='constant', cval=np.nan)
-        return -0.5*util.fast_symmetric_convolve(m, kernel)
-
-    @staticmethod
-    def _sg_kernel(sf, step_x, step_y):
-
-        xx, yy = np.meshgrid(np.linspace(sf*step_x, -sf*step_x, 2*sf+1),
-                             np.linspace(sf*step_y, -sf*step_y, 2*sf+1))
-
-        xx = np.reshape(xx, (-1, 1))
-        yy = np.reshape(yy, (-1, 1))
-
-        coefficients = np.linalg.pinv(np.hstack((np.ones_like(xx), xx, xx**2, yy, yy**2, xx*yy)))
-
-        kernel = np.reshape(coefficients[5, :], (2*sf+1, 2*sf+1))
-
-        return kernel
-
     def compute_forc_distribution(self, sf=3, method='savitzky-golay', extension='flat', n_fit_points=10):
 
         log.debug("Computing FORC distribution: sf={}, method={}, extension={}".format(sf, method, extension))
@@ -513,28 +484,11 @@ class PMCForc(ForcBase):
             self._extend_dataset(sf=3, method=extension, n_fit_points=n_fit_points)
 
         if method == 'savitzky-golay':
-            rho = self._compute_forc_sg(self.m, sf=3, step_x=self.step, step_y=self.step)
+            rho = util.compute_forc_sg(self.m, sf=3, step_x=self.step, step_y=self.step)
         else:
             raise NotImplementedError("method {} not implemented for FORC distribution calculation".format(method))
 
         return PMCForc(h=self.h, hr=self.hr, m=self.m, rho=rho, T=self.temperature)
-
-    @classmethod
-    def _extend_flat(cls, h, m):
-        for i in range(m.shape[0]):
-            first_data_index = util.arg_first_not_nan(m[i])
-            m[i, 0:first_data_index] = m[i, first_data_index]
-        return
-
-    @classmethod
-    def _extend_slope(cls, h, m, n_fit_points=10):
-        for i in range(m.shape[0]):
-
-            j = util.arg_first_not_nan(m[i])
-            popt, _ = so.curve_fit(util.line, h[i, j:j+n_fit_points], m[i, j:j+n_fit_points])
-            m[i, 0:j] = util.line(h[i, 0:j], *popt)
-
-        return
 
     def major_loop(self):
         """Construct a major loop from the FORC data. Takes all of the uppermost curve, and appends the reversal points
