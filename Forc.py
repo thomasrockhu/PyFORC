@@ -38,16 +38,70 @@ class ForcBase(abc.ABC):
 
         super(ForcBase, self).__init__()
 
+        # Data limits
+        self._h_min = np.nan
+        self._h_max = np.nan
+        self._hr_min = np.nan
+        self._hr_max = np.nan
+        self._m_min = np.nan
+        self._m_max = np.nan
+        self._T_min = np.nan
+        self._T_max = np.nan
+
+        # Data
         self.h = None
         self.hr = None
         self.m = None
+        self.rho = None
+        self.rho_uncertainty = None
         self.temperature = None
-        self.drift_points = None
 
         return
 
+    def get_data(self, data_str):
+        data_str = data_str.lower()
+        if data_str in ['m', 'rho', 'rho_uncertainty', 'temperature']:
+            return getattr(self, data_str)
+        else:
+            raise ValueError('Invalid data field: {}'.format(data_str))
 
-class PMCForc():
+    def h_range(self):
+        return (self._h_min, self._h_max)
+
+    def hr_range(self):
+        return (self._hr_min, self._hr_max)
+
+    def m_range(self):
+        return (self._m_min, self._m_max)
+
+    def hc_range(self, mask=True):
+        hc, _ = self._hchb()
+        if mask is True or mask.lower() == 'h<hr':
+            return (np.min(hc[np.nonzero(1 - np.isnan(hc + self.m))]),
+                    np.max(hc[np.nonzero(1 - np.isnan(hc + self.m))]))
+        else:
+            return (np.min(hc), np.max(hc))
+
+    def hb_range(self, mask=True):
+        _, hb = self._hchb()
+        if mask is True or mask.lower() == 'h<hr':
+            return (np.min(hb[np.nonzero(1 - np.isnan(hb + self.m))]),
+                    np.max(hb[np.nonzero(1 - np.isnan(hb + self.m))]))
+        else:
+            return (np.min(hb), np.max(hb))
+
+    def _hchb(self):
+        return util.hhr_to_hchb(self.h, self.hr)
+
+    @property
+    def shape(self):
+        if isinstance(self.h, np.ndarray):
+            return self.h.shape
+        else:
+            raise ValueError("self.h has not been interpolated to numpy.ndarray! Type: {}".format(type(self.h)))
+
+
+class PMCForc(ForcBase):
     """FORC class for PMC-formatted data. See the PMC format spec for more info. Magnetization (and, if present,
     temperature) data is optionally drift corrected upon instantiation before being interpolated on a
     uniform grid in (H, H_r) space.
@@ -64,43 +118,23 @@ class PMCForc():
 
         super(PMCForc, self).__init__(None)
 
-        self._h_min = np.nan
-        self._h_max = np.nan
-        self._hr_min = np.nan
-        self._hr_max = np.nan
-        self._m_min = np.nan
-        self._m_max = np.nan
-        self._T_min = np.nan
-        self._T_max = np.nan
-
         if all([item is not None for item in (h, hr, m)]):
-            self.h = None             # Field
-            self.hr = None            # Reversal field
-            self.m = None             # Moment
-            self.temperature = None   # Temperature (if any)
-            self.rho = None           # FORC distribution.
+            self.h = None
+            self.hr = None
+            self.m = None
+            self.temperature = None
+            self.rho = None
 
             self._from_input_arrays(h, hr, m, T, rho)
             self.step = self._determine_step()
 
         elif path is not None:
-            self.h = []               # Field
-            self.hr = []              # Reversal field
-            self.m = []               # Moment
-            self.temperature = None   # Temperature (if any)
-            self.rho = None           # FORC distribution.
-            self.drift_points = []    # Drift points
-
-            self._from_file(path)
-            if drift:
-                self._drift_correction(radius=radius, density=density)
-
-            if step is None:
-                self.step = self._determine_step()
-            else:
-                self.step = step
-
-            self._interpolate(method=method)
+            data = PMCImporter(path, step, method, drift, radius, density)
+            self.h = data.h
+            self.hr = data.hr
+            self.m = data.m
+            self.temperature = data.temperature
+            self.step = data.step
 
         else:
             raise IOError('PMCForc can only be specified from valid path or from numpy arrays!')
@@ -130,261 +164,6 @@ class PMCForc():
 
         return
 
-    def _from_file(self, path):
-        """Read a PMC-formatted file from path.
-
-        Parameters
-        ----------
-        path : str
-            Path to PMC-formatted csv file.
-        """
-
-        file = pathlib.Path(path)
-        log.info("Extracting data from file: {}".format(file))
-
-        with open(file, 'r') as f:
-            lines = f.readlines()
-
-        self._extract_raw_data(lines)
-
-        return
-
-    def _has_drift_points(self, lines):
-        """Checks whether the measurement space has been specified in (Hc, Hb) coordinates or in (H, Hr). If it
-        has been measured in (Hc, Hb) coordinates, the header will contain references to the limits of the
-        measured data. If the measurement has been done in (Hc, Hb), drift points are necessary before the
-        start of each reversal curve, which affects how the data is extracted.
-
-        Parameters
-        ----------
-        lines : str
-            Lines from a PMC-formatted data file.
-
-        Returns
-        -------
-        bool
-            True if 'Hb1' is detected in the start of a line somewhere in the data file, False otherwise.
-        """
-
-        for i in range(len(lines)):
-            if "Hb1" == lines[i][:3]:
-                return True
-        return False
-
-    def _lines_have_temperature(self, line):
-        """Checks for temperature measurements in a file. If line has 3 data values, the third is considered
-        a temperature measurement.
-
-        Parameters
-        ----------
-        line : str
-            PMC formatted line to check
-
-        Returns
-        -------
-        bool
-            True if the line contains 3 floats or False if not.
-        """
-
-        return len(line.split(sep=',')) == 3
-
-    def _extract_raw_data(self, lines):
-        """Extracts the raw data from lines of a PMC-formatted csv file.
-
-        Parameters
-        ----------
-        lines : str
-            Contents of a PMC-formatted data file.
-        """
-
-        i = self._find_first_data_point(lines)
-        if self._lines_have_temperature(lines[i]):
-            self._T = []
-
-        if self._has_drift_points(lines):
-            while i < len(lines) and lines[i][0] in ['+', '-']:
-                self._extract_drift_point(lines[i])
-                i += 2
-                i += self._extract_next_forc(lines[i:])
-                i += 1
-        else:
-            while i < len(lines) and lines[i][0]in ['+', '-']:
-                i += self._extract_next_forc(lines[i:])
-                self._extract_drift_point(lines[i-1:])
-                i += 1
-
-        return
-
-    def _find_first_data_point(self, lines):
-        """Return the index of the first data point in the PMC-formatted lines.
-
-        Parameters
-        ----------
-        lines : str
-            Contents of a PMC-formatted data file.
-
-        Raises
-        ------
-        errors.DataFormatError
-            If no lines begin with '+' or '-', an error is raised. Data points must begin with '+' or
-
-        Returns
-        -------
-        int
-            Index of the first data point. Skips over any header info at the start of the file, as long as
-            the header lines do not begin with '+' or '-'.
-        """
-
-        for i in range(len(lines)):
-            if lines[i][0] in ['+', '-']:
-                return i
-
-        raise DataFormatError("No data found in file. Check data format spec.")
-
-    def _extract_next_forc(self, lines):
-        """Extract the next curve from the data.
-
-        Parameters
-        ----------
-        lines : str
-            Raw csv data in string format, from a PMC-type formatted file.
-
-        Returns
-        -------
-        int
-            Number of lines extracted
-        """
-
-        _h, _m, _hr, _T = [], [], [], []
-        i = 0
-
-        while lines[i][0] in ['+', '-']:
-            split_line = lines[i].split(',')
-            _h.append(float(split_line[0]))
-            _hr.append(_h[0])
-            _m.append(float(split_line[1]))
-            if self.temperature is not None:
-                _T.append(float(split_line[2]))
-            i += 1
-
-        self.h.append(_h)
-        self.hr.append(_hr)
-        self.m.append(_m)
-        if self.temperature is not None:
-            self.temperature.append(_T)
-
-        return len(_h)
-
-    def _extract_drift_point(self, line):
-        """Extract the drift point from the specified input line. Only records the moment,
-        not the measurement field from the drift point (the field isn't used in any drift correction).
-        Appends the drift point to self.drift_points.
-
-        Parameters
-        ----------
-        line : str
-            Line from data file which contains the drift point.
-        """
-
-        self.drift_points.append(float(line.split(sep=',')[-1]))
-        return
-
-    @property
-    def shape(self):
-        if isinstance(self.h, np.ndarray):
-            return self.h.shape
-        else:
-            raise ValueError("self.h has not been interpolated to numpy.ndarray! Type: {}".format(type(self.h)))
-
-    def _determine_step(self):
-        """Calculate the field step size. Only works along the h-direction, since that's where most of the points live
-        in hhr space. Takes the mean of the field steps along each reversal curve, then takes the mean of those means
-        as the field step size.
-
-        #TODO could this be better? make a histogram and do a fit?
-
-        Returns
-        -------
-        float
-            Field step size.
-        """
-
-        step_sizes = np.empty(len(self.h))
-
-        for i in range(step_sizes.shape[0]):
-            step_sizes[i] = np.mean(np.diff(self.h[i], n=1))
-
-        return np.mean(step_sizes)
-
-    def _interpolate(self, method='cubic'):
-        """Interpolate the dataset in (H, Hr) space. See documentation for scipy.optimize.griddata for more info.
-
-        method : str, optional
-            Interpolation method, used as parameter for scipy.optimize.griddata.
-            (the default is 'cubic', which is usually well behaved for evenly spaced data points, but can result
-            in spikes in the interpolated data for irregularly spaced data. Use 'linear' if this is the case.)
-
-        """
-
-        # Determine min and max values of (h, hr) from raw input lists for interpolation.
-        h_min = self.h[0][0]
-        h_max = self.h[0][0]
-        hr_min = self.hr[0][0]
-        hr_max = self.hr[0][0]
-        for i in range(len(self.h)):
-            h_min = np.min(self.h[i]) if np.min(self.h[i]) < h_min else h_min
-            h_max = np.max(self.h[i]) if np.max(self.h[i]) > h_max else h_max
-            hr_min = np.min(self.hr[i]) if np.min(self.hr[i]) < hr_min else hr_min
-            hr_max = np.max(self.hr[i]) if np.max(self.hr[i]) > hr_max else hr_max
-
-        _h, _hr = np.meshgrid(np.arange(h_min, h_max, self.step),
-                              np.arange(hr_min, hr_max, self.step))
-
-        data_hhr = [[self.h[i][j], self.hr[i][j]] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-        data_m = [self.m[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-
-        _m = si.griddata(np.array(data_hhr), np.array(data_m), (_h, _hr), method=method)
-        if self.temperature is not None:
-            data_T = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-            self.temperature = si.griddata(np.array(data_hhr), np.array(data_T), (_h, _hr), method=method)
-
-        _m[_h < _hr] = np.nan
-
-        self.h = _h
-        self.hr = _hr
-        self.m = _m
-
-        return
-
-    def _drift_correction(self, radius=4, density=3):
-        # TODO: make this python-free
-
-        kernel_size = 2*radius+1
-        kernel = np.ones(kernel_size)/kernel_size
-
-        average_drift = np.mean(self.drift_points)
-        moving_average = snf.convolve(self.drift_points, kernel, mode='nearest')
-        interpolated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=1)
-
-        if len(self.drift_points) % density == 0:
-            interpolated_drift = si.interp1d(np.arange(start=0, stop=len(self.drift_points), step=density),
-                                             moving_average[::density],
-                                             kind='cubic')
-        else:
-            interpolated_drift = si.interp1d(np.hstack((np.arange(start=0, stop=len(self.drift_points), step=density),
-                                                        len(self.drift_points)-1)),
-                                             np.hstack((moving_average[::density],
-                                                        np.array(moving_average[-1]))),
-                                             kind='cubic')
-
-        for i in interpolated_drift_indices:
-            drift = (interpolated_drift(i) - average_drift)
-            self.drift_points[i] -= drift
-            for j in range(len(self.m[i])):
-                self.m[i][j] -= drift
-
-        return
-
     def _update_data_range(self):
         """Cache the limits of the data in hhr space to make plotting faster.
 
@@ -404,34 +183,6 @@ class PMCForc():
             self._T_max = np.nanmax(self.temperature)
 
         return
-
-    def h_range(self):
-        return (self._h_min, self._h_max)
-
-    def hr_range(self):
-        return (self._hr_min, self._hr_max)
-
-    def hc_range(self, mask=True):
-        hc, _ = self._hchb()
-        if mask is True or mask.lower() == 'h<hr':
-            return (np.min(hc[np.nonzero(1 - np.isnan(hc + self.m))]),
-                    np.max(hc[np.nonzero(1 - np.isnan(hc + self.m))]))
-        else:
-            return (np.min(hc), np.max(hc))
-
-    def hb_range(self, mask=True):
-        _, hb = self._hchb()
-        if mask is True or mask.lower() == 'h<hr':
-            return (np.min(hb[np.nonzero(1 - np.isnan(hb + self.m))]),
-                    np.max(hb[np.nonzero(1 - np.isnan(hb + self.m))]))
-        else:
-            return (np.min(hb), np.max(hb))
-
-    def _hchb(self):
-        return util.hhr_to_hchb(self.h, self.hr)
-
-    def m_range(self):
-        return (self._m_min, self._m_max)
 
     @property
     def extent_hhr(self):
@@ -567,13 +318,6 @@ class PMCForc():
         else:
             raise ValueError('Invalid coordinates: {}'.format(coordinates))
 
-    def get_data(self, data_str):
-        data_str = data_str.lower()
-        if data_str in ['m', 'rho', 'rho_uncertainty', 'temperature']:
-            return getattr(self, data_str)
-        else:
-            raise ValueError('Invalid data field: {}'.format(data_str))
-
     def normalize(self, method='minmax'):
         if method == 'minmax':
             return PMCForc(h=self.h,
@@ -595,6 +339,346 @@ class PMCForc():
 
     def has_temperature(self):
         return np.any(1 - np.isnan(self.m))
+
+    def _determine_step(self):
+        return np.mean(np.mean(np.diff(self.h, n=1, axis=1), axis=1))
+
+    def __repr__(self):
+        return 'PMCForc(shape, {})'.format(self.shape)
+
+    def __str__(self):
+        return """PMCForc Object
+        shape: {}
+        number of points: {}
+        h_range: {}
+        hr_range: {}
+        """.format(self.shape,
+                   np.prod(self.shape),
+                   self.h_range(),
+                   self.hr_range())
+
+    def __len__(self):
+        return np.prod(self.shape)
+
+    def __eq__(self, other):
+
+        f1 = f2 = f3 = True
+
+        f1 = np.all([np.allclose(self.h, other.h, rtol=0, atol=0, equal_nan=True),
+                     np.allclose(self.hr, other.hr, rtol=0, atol=0, equal_nan=True),
+                     np.allclose(self.m, other.m, rtol=0, atol=0, equal_nan=True)])
+
+        if self.rho is not None:
+            f2 = np.all([np.allclose(self.rho, other.rho, rtol=0, atol=0, equal_nan=True),
+                         np.allclose(self.rho_uncertainty, other.rho_uncertainty, rtol=0, atol=0, equal_nan=True)])
+
+        if self.temperature is not None:
+            f3 = np.allclose(self.temperature, other.temperature, rtol=0, atol=0, equal_nan=True)
+
+        return f1 and f2 and f3
+
+    def __add__(self, other):
+        if isinstance(other, ForcBase):
+            if np.all([np.allclose(self.h, other.h), np.allclose(self.hr, other.hr)]):
+                return PMCForc(h=self.h, hr=self.hr, m=self.m+other.m, rho=self.rho+other.rho)
+            else:
+                raise ForcError('Cannot add Forcs with different h and hr values.')
+        elif util.is_numeric(other):
+            return PMCForc(h=self.h, hr=self.hr, m=self.m+other, rho=self.rho+other)
+        else:
+            raise TypeError('Must be Forc, not {}'.format(type(other)))
+
+    def __sub__(self, other):
+        if isinstance(other, ForcBase):
+            if np.all([np.allclose(self.h, other.h), np.allclose(self.hr, other.hr)]):
+                return PMCForc(h=self.h, hr=self.hr, m=self.m-other.m, rho=self.rho-other.rho)
+            else:
+                raise ForcError('Cannot add Forcs with different h and hr values.')
+        elif util.is_numeric(other):
+            return PMCForc(h=self.h, hr=self.hr, m=self.m+other, rho=self.rho+other)
+        else:
+            raise TypeError('Must be Forc, not {}'.format(type(other)))
+
+
+class PMCImporter:
+    """This is a class used to import and store raw PMC formatted FORC data, apply a drift correction (optional),
+    and then interpolate the dataset.
+
+    Raises
+    ------
+    DataFormatError
+        Thrown when the input file can't be recognized.
+    """
+
+    def __init__(self, path, step, method, drift, radius, density):
+        self.drift_points = None
+
+        self.h = []               # Field
+        self.hr = []              # Reversal field
+        self.m = []               # Moment
+        self.temperature = None   # Temperature (if any)
+        self.drift_points = []    # Drift points
+
+        self._from_file(path)
+        if drift:
+            self._drift_correction(radius=radius, density=density)
+
+        if step is None:
+            self.step = self._determine_step()
+        else:
+            self.step = step
+
+        self._interpolate(method=method)
+
+        return
+
+    def _from_file(self, path):
+        """Read a PMC-formatted file from path.
+
+        Parameters
+        ----------
+        path : str
+            Path to PMC-formatted csv file.
+        """
+
+        file = pathlib.Path(path)
+        log.info("Extracting data from file: {}".format(file))
+
+        with open(file, 'r') as f:
+            lines = f.readlines()
+
+        self._extract_raw_data(lines)
+
+        return
+
+    def _has_drift_points(self, lines):
+        """Checks whether the measurement space has been specified in (Hc, Hb) coordinates or in (H, Hr). If it
+        has been measured in (Hc, Hb) coordinates, the header will contain references to the limits of the
+        measured data. If the measurement has been done in (Hc, Hb), drift points are necessary before the
+        start of each reversal curve, which affects how the data is extracted.
+
+        Parameters
+        ----------
+        lines : str
+            Lines from a PMC-formatted data file.
+
+        Returns
+        -------
+        bool
+            True if 'Hb1' is detected in the start of a line somewhere in the data file, False otherwise.
+        """
+
+        for i in range(len(lines)):
+            if "Hb1" == lines[i][:3]:
+                return True
+        return False
+
+    def _lines_have_temperature(self, line):
+        """Checks for temperature measurements in a file. If line has 3 data values, the third is considered
+        a temperature measurement.
+
+        Parameters
+        ----------
+        line : str
+            PMC formatted line to check
+
+        Returns
+        -------
+        bool
+            True if the line contains 3 floats or False if not.
+        """
+
+        return len(line.split(sep=',')) == 3
+
+    def _extract_raw_data(self, lines):
+        """Extracts the raw data from lines of a PMC-formatted csv file.
+
+        Parameters
+        ----------
+        lines : str
+            Contents of a PMC-formatted data file.
+        """
+
+        i = self._find_first_data_point(lines)
+        if self._lines_have_temperature(lines[i]):
+            self.temperature = []
+
+        if self._has_drift_points(lines):
+            while i < len(lines) and lines[i][0] in ['+', '-']:
+                self._extract_drift_point(lines[i])
+                i += 2
+                i += self._extract_next_forc(lines[i:])
+                i += 1
+        else:
+            while i < len(lines) and lines[i][0]in ['+', '-']:
+                i += self._extract_next_forc(lines[i:])
+                self._extract_drift_point(lines[i-1:])
+                i += 1
+
+        return
+
+    def _find_first_data_point(self, lines):
+        """Return the index of the first data point in the PMC-formatted lines.
+
+        Parameters
+        ----------
+        lines : str
+            Contents of a PMC-formatted data file.
+
+        Raises
+        ------
+        errors.DataFormatError
+            If no lines begin with '+' or '-', an error is raised. Data points must begin with '+' or
+
+        Returns
+        -------
+        int
+            Index of the first data point. Skips over any header info at the start of the file, as long as
+            the header lines do not begin with '+' or '-'.
+        """
+
+        for i in range(len(lines)):
+            if lines[i][0] in ['+', '-']:
+                return i
+
+        raise DataFormatError("No data found in file. Check data format spec.")
+
+    def _extract_next_forc(self, lines):
+        """Extract the next curve from the data.
+
+        Parameters
+        ----------
+        lines : str
+            Raw csv data in string format, from a PMC-type formatted file.
+
+        Returns
+        -------
+        int
+            Number of lines extracted
+        """
+
+        _h, _m, _hr, _T = [], [], [], []
+        i = 0
+
+        while lines[i][0] in ['+', '-']:
+            split_line = lines[i].split(',')
+            _h.append(float(split_line[0]))
+            _hr.append(_h[0])
+            _m.append(float(split_line[1]))
+            if self.temperature is not None:
+                _T.append(float(split_line[2]))
+            i += 1
+
+        self.h.append(_h)
+        self.hr.append(_hr)
+        self.m.append(_m)
+        if self.temperature is not None:
+            self.temperature.append(_T)
+
+        return len(_h)
+
+    def _extract_drift_point(self, line):
+        """Extract the drift point from the specified input line. Only records the moment,
+        not the measurement field from the drift point (the field isn't used in any drift correction).
+        Appends the drift point to self.drift_points.
+
+        Parameters
+        ----------
+        line : str
+            Line from data file which contains the drift point.
+        """
+
+        self.drift_points.append(float(line.split(sep=',')[-1]))
+        return
+
+    def _determine_step(self):
+        """Calculate the field step size. Only works along the h-direction, since that's where most of the points live
+        in hhr space. Takes the mean of the field steps along each reversal curve, then takes the mean of those means
+        as the field step size.
+
+        #TODO could this be better? make a histogram and do a fit?
+
+        Returns
+        -------
+        float
+            Field step size.
+        """
+
+        step_sizes = np.empty(len(self.h))
+
+        for i in range(step_sizes.shape[0]):
+            step_sizes[i] = np.mean(np.diff(self.h[i], n=1))
+
+        return np.mean(step_sizes)
+
+    def _interpolate(self, method='cubic'):
+        """Interpolate the dataset in (H, Hr) space. See documentation for scipy.optimize.griddata for more info.
+
+        method : str, optional
+            Interpolation method, used as parameter for scipy.optimize.griddata.
+            (the default is 'cubic', which is usually well behaved for evenly spaced data points, but can result
+            in spikes in the interpolated data for irregularly spaced data. Use 'linear' if this is the case.)
+
+        """
+
+        # Determine min and max values of (h, hr) from raw input lists for interpolation.
+        h_min = self.h[0][0]
+        h_max = self.h[0][0]
+        hr_min = self.hr[0][0]
+        hr_max = self.hr[0][0]
+        for i in range(len(self.h)):
+            h_min = np.min(self.h[i]) if np.min(self.h[i]) < h_min else h_min
+            h_max = np.max(self.h[i]) if np.max(self.h[i]) > h_max else h_max
+            hr_min = np.min(self.hr[i]) if np.min(self.hr[i]) < hr_min else hr_min
+            hr_max = np.max(self.hr[i]) if np.max(self.hr[i]) > hr_max else hr_max
+
+        _h, _hr = np.meshgrid(np.arange(h_min, h_max, self.step),
+                              np.arange(hr_min, hr_max, self.step))
+
+        data_hhr = [[self.h[i][j], self.hr[i][j]] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+        data_m = [self.m[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+
+        _m = si.griddata(np.array(data_hhr), np.array(data_m), (_h, _hr), method=method)
+        if self.temperature is not None:
+            data_T = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+            self.temperature = si.griddata(np.array(data_hhr), np.array(data_T), (_h, _hr), method=method)
+
+        _m[_h < _hr] = np.nan
+
+        self.h = _h
+        self.hr = _hr
+        self.m = _m
+
+        return
+
+    def _drift_correction(self, radius=4, density=3):
+        # TODO: make this python-free
+
+        kernel_size = 2*radius+1
+        kernel = np.ones(kernel_size)/kernel_size
+
+        average_drift = np.mean(self.drift_points)
+        moving_average = snf.convolve(self.drift_points, kernel, mode='nearest')
+        interpolated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=1)
+
+        if len(self.drift_points) % density == 0:
+            interpolated_drift = si.interp1d(np.arange(start=0, stop=len(self.drift_points), step=density),
+                                             moving_average[::density],
+                                             kind='cubic')
+        else:
+            interpolated_drift = si.interp1d(np.hstack((np.arange(start=0, stop=len(self.drift_points), step=density),
+                                                        len(self.drift_points)-1)),
+                                             np.hstack((moving_average[::density],
+                                                        np.array(moving_average[-1]))),
+                                             kind='cubic')
+
+        for i in interpolated_drift_indices:
+            drift = (interpolated_drift(i) - average_drift)
+            self.drift_points[i] -= drift
+            for j in range(len(self.m[i])):
+                self.m[i][j] -= drift
+
+        return
 
 
 class ForcError(Exception):
