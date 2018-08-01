@@ -8,6 +8,7 @@ import scipy.ndimage.filters as snf
 import scipy.optimize as so
 import util
 import numba as nb
+import warnings
 
 log = logging.getLogger(__name__)
 
@@ -81,26 +82,19 @@ class PMCForc(ForcBase):
             self.rho = None           # FORC distribution.
 
             self._from_input_arrays(h, hr, m, T, rho)
+            if step is not None:
+                warnings.warn('''Step was specified during forc instantiation, but numpy arrays were also given. 
+                                 Using calculated step from numpy arrays.''')
             self.step = self._determine_step()
 
         elif path is not None:
-            self.h = []               # Field
-            self.hr = []              # Reversal field
-            self.m = []               # Moment
-            self.temperature = None   # Temperature (if any)
-            self.rho = None           # FORC distribution.
-            self.drift_points = []    # Drift points
-
-            self._from_file(path)
-            if drift:
-                self._drift_correction(radius=radius, density=density)
-
-            if step is None:
-                self.step = self._determine_step()
-            else:
-                self.step = step
-
-            self._interpolate(method=method)
+            data = PMCImporter(path, drift=drift, radius=radius, density=density, step=step, method=method)
+            self.h = data.h
+            self.hr = data.hr
+            self.m = data.m
+            self.temperature = data.temperature
+            self.rho = data.rho
+            self.step = data.step
 
         else:
             raise IOError('PMCForc can only be specified from valid path or from numpy arrays!')
@@ -130,25 +124,6 @@ class PMCForc(ForcBase):
 
         return
 
-    def _from_file(self, path):
-        """Read a PMC-formatted file from path.
-
-        Parameters
-        ----------
-        path : str
-            Path to PMC-formatted csv file.
-        """
-
-        file = pathlib.Path(path)
-        log.info("Extracting data from file: {}".format(file))
-
-        with open(file, 'r') as f:
-            lines = f.readlines()
-
-        self._extract_raw_data(lines)
-
-        return
-
     @property
     def shape(self):
         if isinstance(self.h, np.ndarray):
@@ -175,65 +150,6 @@ class PMCForc(ForcBase):
             step_sizes[i] = np.mean(np.diff(self.h[i], n=1))
 
         return np.mean(step_sizes)
-
-    def _interpolate(self, method='cubic'):
-
-        # Determine min and max values of (h, hr) from raw input lists for interpolation.
-        h_min = self.h[0][0]
-        h_max = self.h[0][0]
-        hr_min = self.hr[0][0]
-        hr_max = self.hr[0][0]
-        for i in range(len(self.h)):
-            h_min = np.min(self.h[i]) if np.min(self.h[i]) < h_min else h_min
-            h_max = np.max(self.h[i]) if np.max(self.h[i]) > h_max else h_max
-            hr_min = np.min(self.hr[i]) if np.min(self.hr[i]) < hr_min else hr_min
-            hr_max = np.max(self.hr[i]) if np.max(self.hr[i]) > hr_max else hr_max
-
-        _h, _hr = np.meshgrid(np.arange(h_min, h_max, self.step),
-                              np.arange(hr_min, hr_max, self.step))
-
-        data_hhr = [[self.h[i][j], self.hr[i][j]] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-        data_m = [self.m[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-
-        _m = si.griddata(np.array(data_hhr), np.array(data_m), (_h, _hr), method=method)
-        if self.temperature is not None:
-            data_T = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-            self.temperature = si.griddata(np.array(data_hhr), np.array(data_T), (_h, _hr), method=method)
-
-        _m[_h < _hr] = np.nan
-
-        self.h = _h
-        self.hr = _hr
-        self.m = _m
-
-        return
-
-    def _drift_correction(self, radius=4, density=3):
-        # TODO: make this python-free
-
-        kernel_size = 2*radius+1
-        kernel = np.ones(kernel_size)/kernel_size
-
-        average_drift = np.mean(self.drift_points)
-        moving_average = snf.convolve(self.drift_points, kernel, mode='nearest')
-        interpolated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=1)
-
-        decimated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=density)
-        decimated_values = moving_average[::density]
-
-        if decimated_drift_indices[-1] != interpolated_drift_indices[-1]:
-            decimated_drift_indices = np.hstack((decimated_drift_indices, np.array(interpolated_drift_indices[-1:])))
-            decimated_values = np.hstack((decimated_values, np.array(moving_average[-1])))
-
-        interpolated_drift = si.interp1d(decimated_drift_indices, decimated_values, kind='cubic')
-
-        for i in interpolated_drift_indices:
-            drift = (interpolated_drift(i) - average_drift)
-            self.drift_points[i] -= drift
-            for j in range(len(self.m[i])):
-                self.m[i][j] -= drift
-
-        return
 
     def _update_data_range(self):
         """Cache the limits of the data in hhr space to make plotting faster.
@@ -487,7 +403,7 @@ class PMCForc(ForcBase):
 
 class PMCImporter:
 
-    def __init__(self, path, drift=False, radius=3, density=4, step=None, method='cubic'):
+    def __init__(self, path, drift, radius, density, step, method):
         if path is not None:
             self.h = []               # Field
             self.hr = []              # Reversal field
@@ -509,6 +425,25 @@ class PMCImporter:
 
         else:
             raise IOError('PMCForc can only be specified from valid path or from numpy arrays!')
+
+    def _from_file(self, path):
+        """Read a PMC-formatted file from path.
+
+        Parameters
+        ----------
+        path : str
+            Path to PMC-formatted csv file.
+        """
+
+        file = pathlib.Path(path)
+        log.info("Extracting data from file: {}".format(file))
+
+        with open(file, 'r') as f:
+            lines = f.readlines()
+
+        self._extract_raw_data(lines)
+
+        return
 
     def _has_drift_points(self, lines):
         """Checks whether the measurement space has been specified in (Hc, Hb) coordinates or in (H, Hr). If it
@@ -648,6 +583,90 @@ class PMCImporter:
         """
 
         self.drift_points.append(float(line.split(sep=',')[1]))
+        return
+
+    def _determine_step(self):
+        """Calculate the field step size. Only works along the h-direction, since that's where most of the points live
+        in hhr space. Takes the mean of the field steps along each reversal curve, then takes the mean of those means
+        as the field step size.
+
+        #TODO could this be better? make a histogram and do a fit?
+
+        Returns
+        -------
+        float
+            Field step size.
+        """
+        return np.mean([np.mean(np.diff(self.h[i], n=1)) for i in range(len(self.h))])
+
+    def _interpolate(self, method='cubic'):
+
+        # Determine min and max values of (h, hr) from raw input lists for interpolation.
+        h_min = self.h[0][0]
+        h_max = self.h[0][0]
+        hr_min = self.hr[0][0]
+        hr_max = self.hr[0][0]
+        for i in range(len(self.h)):
+            h_min = np.min(self.h[i]) if np.min(self.h[i]) < h_min else h_min
+            h_max = np.max(self.h[i]) if np.max(self.h[i]) > h_max else h_max
+            hr_min = np.min(self.hr[i]) if np.min(self.hr[i]) < hr_min else hr_min
+            hr_max = np.max(self.hr[i]) if np.max(self.hr[i]) > hr_max else hr_max
+
+        _h, _hr = np.meshgrid(np.arange(h_min, h_max, self.step),
+                              np.arange(hr_min, hr_max, self.step))
+
+        data_hhr = [[self.h[i][j], self.hr[i][j]] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+        data_m = [self.m[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+
+        _m = si.griddata(np.array(data_hhr), np.array(data_m), (_h, _hr), method=method)
+        if self.temperature is not None:
+            data_T = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+            self.temperature = si.griddata(np.array(data_hhr), np.array(data_T), (_h, _hr), method=method)
+
+        _m[_h < _hr] = np.nan
+
+        self.h = _h
+        self.hr = _hr
+        self.m = _m
+
+        return
+
+    def _drift_correction(self, radius=4, density=3):
+        """Apply a drift correction to the magnetization data.
+        
+        Parameters
+        ----------
+        radius : int, optional
+            Number of adjacent points in moving average (the default is 4)
+        density : int, optional
+            Interpolation skips over every _density_ number of points. Increase this number to avoid overfitting.
+            (the default is 3)
+        
+        """
+
+
+        kernel_size = 2*radius+1
+        kernel = np.ones(kernel_size)/kernel_size
+
+        average_drift = np.mean(self.drift_points)
+        moving_average = snf.convolve(self.drift_points, kernel, mode='nearest')
+        interpolated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=1)
+
+        decimated_drift_indices = np.arange(start=0, stop=len(self.drift_points), step=density)
+        decimated_values = moving_average[::density]
+
+        if decimated_drift_indices[-1] != interpolated_drift_indices[-1]:
+            decimated_drift_indices = np.hstack((decimated_drift_indices, np.array(interpolated_drift_indices[-1:])))
+            decimated_values = np.hstack((decimated_values, np.array(moving_average[-1])))
+
+        interpolated_drift = si.interp1d(decimated_drift_indices, decimated_values, kind='cubic')
+
+        for i in interpolated_drift_indices:
+            drift = (interpolated_drift(i) - average_drift)
+            self.drift_points[i] -= drift
+            for j in range(len(self.m[i])):
+                self.m[i][j] -= drift
+
         return
 
 
