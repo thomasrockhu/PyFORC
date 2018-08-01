@@ -149,146 +149,6 @@ class PMCForc(ForcBase):
 
         return
 
-    def _has_drift_points(self, lines):
-        """Checks whether the measurement space has been specified in (Hc, Hb) coordinates or in (H, Hr). If it
-        has been measured in (Hc, Hb) coordinates, the header will contain references to the limits of the
-        measured data. If the measurement has been done in (Hc, Hb), drift points are necessary before the
-        start of each reversal curve, which affects how the data is extracted.
-
-        Parameters
-        ----------
-        lines : str
-            Lines from a PMC-formatted data file.
-
-        Returns
-        -------
-        bool
-            True if 'Hb1' is detected in the start of a line somewhere in the data file, False otherwise.
-        """
-
-        for i in range(len(lines)):
-            if "Hb1" == lines[i][:3]:
-                return True
-        return False
-
-    def _lines_have_temperature(self, line):
-        """Checks for temperature measurements in a file. If line has 3 data values, the third is considered
-        a temperature measurement.
-
-        Parameters
-        ----------
-        line : str
-            PMC formatted line to check
-
-        Returns
-        -------
-        bool
-            True if the line contains 3 floats or False if not.
-        """
-
-        return len(line.split(sep=',')) == 3
-
-    def _extract_raw_data(self, lines):
-        """Extracts the raw data from lines of a PMC-formatted csv file.
-
-        Parameters
-        ----------
-        lines : str
-            Contents of a PMC-formatted data file.
-        """
-
-        i = self._find_first_data_point(lines)
-        if self._lines_have_temperature(lines[i]):
-            self._T = []
-
-        if self._has_drift_points(lines):
-            while i < len(lines) and lines[i][0] in ['+', '-']:
-                self._extract_drift_point(lines[i])
-                i += 2
-                i += self._extract_next_forc(lines[i:])
-                i += 1
-        else:
-            while i < len(lines) and lines[i][0]in ['+', '-']:
-                i += self._extract_next_forc(lines[i:])
-                self._extract_drift_point(lines[i-1])
-                i += 1
-
-        return
-
-    def _find_first_data_point(self, lines):
-        """Return the index of the first data point in the PMC-formatted lines.
-
-        Parameters
-        ----------
-        lines : str
-            Contents of a PMC-formatted data file.
-
-        Raises
-        ------
-        errors.DataFormatError
-            If no lines begin with '+' or '-', an error is raised. Data points must begin with '+' or
-
-        Returns
-        -------
-        int
-            Index of the first data point. Skips over any header info at the start of the file, as long as
-            the header lines do not begin with '+' or '-'.
-        """
-
-        for i in range(len(lines)):
-            if lines[i][0] in ['+', '-']:
-                return i
-
-        raise DataFormatError("No data found in file. Check data format spec.")
-
-    def _extract_next_forc(self, lines):
-        """Extract the next curve from the data.
-
-        Parameters
-        ----------
-        lines : str
-            Raw csv data in string format, from a PMC-type formatted file.
-
-        Returns
-        -------
-        int
-            Number of lines extracted
-        """
-
-        _h, _m, _hr, _T = [], [], [], []
-        i = 0
-
-        while lines[i][0] in ['+', '-']:
-            split_line = lines[i].split(',')
-            _h.append(float(split_line[0]))
-            _hr.append(_h[0])
-            _m.append(float(split_line[1]))
-            if self.temperature is not None:
-                _T.append(float(split_line[2]))
-            i += 1
-
-        self.h.append(_h)
-        self.hr.append(_hr)
-        self.m.append(_m)
-        if self.temperature is not None:
-            self.temperature.append(_T)
-
-        return len(_h)
-
-    def _extract_drift_point(self, line):
-        """Extract the drift point from the specified input line. Only records the moment,
-        not the measurement field from the drift point (the field isn't used in any drift correction).
-        Appends the drift point to self.drift_points.
-
-        Parameters
-        ----------
-        line : str
-            Line from data file which contains the drift point.
-        """
-
-        self.drift_points.append(float(line.split(sep=',')[1]))
-        return
-
     @property
     def shape(self):
         if isinstance(self.h, np.ndarray):
@@ -623,6 +483,172 @@ class PMCForc(ForcBase):
 
     def has_temperature(self):
         return np.any(1 - np.isnan(self.m))
+
+
+class PMCImporter:
+
+    def __init__(self, path, drift=False, radius=3, density=4, step=None, method='cubic'):
+        if path is not None:
+            self.h = []               # Field
+            self.hr = []              # Reversal field
+            self.m = []               # Moment
+            self.temperature = None   # Temperature (if any)
+            self.rho = None           # FORC distribution.
+            self.drift_points = []    # Drift points
+
+            self._from_file(path)
+            if drift:
+                self._drift_correction(radius=radius, density=density)
+
+            if step is None:
+                self.step = self._determine_step()
+            else:
+                self.step = step
+
+            self._interpolate(method=method)
+
+        else:
+            raise IOError('PMCForc can only be specified from valid path or from numpy arrays!')
+
+    def _has_drift_points(self, lines):
+        """Checks whether the measurement space has been specified in (Hc, Hb) coordinates or in (H, Hr). If it
+        has been measured in (Hc, Hb) coordinates, the header will contain references to the limits of the
+        measured data. If the measurement has been done in (Hc, Hb), drift points are necessary before the
+        start of each reversal curve, which affects how the data is extracted.
+
+        Parameters
+        ----------
+        lines : str
+            Lines from a PMC-formatted data file.
+
+        Returns
+        -------
+        bool
+            True if 'Hb1' is detected in the start of a line somewhere in the data file, False otherwise.
+        """
+
+        for i in range(len(lines)):
+            if "Hb1" == lines[i][:3]:
+                return True
+        return False
+
+    def _lines_have_temperature(self, line):
+        """Checks for temperature measurements in a file. If line has 3 data values, the third is considered
+        a temperature measurement.
+
+        Parameters
+        ----------
+        line : str
+            PMC formatted line to check
+
+        Returns
+        -------
+        bool
+            True if the line contains 3 floats or False if not.
+        """
+
+        return len(line.split(sep=',')) == 3
+
+    def _extract_raw_data(self, lines):
+        """Extracts the raw data from lines of a PMC-formatted csv file.
+
+        Parameters
+        ----------
+        lines : str
+            Contents of a PMC-formatted data file.
+        """
+
+        i = self._find_first_data_point(lines)
+        if self._lines_have_temperature(lines[i]):
+            self._T = []
+
+        if self._has_drift_points(lines):
+            while i < len(lines) and lines[i][0] in ['+', '-']:
+                self._extract_drift_point(lines[i])
+                i += 2
+                i += self._extract_next_forc(lines[i:])
+                i += 1
+        else:
+            while i < len(lines) and lines[i][0]in ['+', '-']:
+                i += self._extract_next_forc(lines[i:])
+                self._extract_drift_point(lines[i-1])
+                i += 1
+
+        return
+
+    def _find_first_data_point(self, lines):
+        """Return the index of the first data point in the PMC-formatted lines.
+
+        Parameters
+        ----------
+        lines : str
+            Contents of a PMC-formatted data file.
+
+        Raises
+        ------
+        errors.DataFormatError
+            If no lines begin with '+' or '-', an error is raised. Data points must begin with '+' or
+
+        Returns
+        -------
+        int
+            Index of the first data point. Skips over any header info at the start of the file, as long as
+            the header lines do not begin with '+' or '-'.
+        """
+
+        for i in range(len(lines)):
+            if lines[i][0] in ['+', '-']:
+                return i
+
+        raise DataFormatError("No data found in file. Check data format spec.")
+
+    def _extract_next_forc(self, lines):
+        """Extract the next curve from the data.
+
+        Parameters
+        ----------
+        lines : str
+            Raw csv data in string format, from a PMC-type formatted file.
+
+        Returns
+        -------
+        int
+            Number of lines extracted
+        """
+
+        _h, _m, _hr, _T = [], [], [], []
+        i = 0
+
+        while lines[i][0] in ['+', '-']:
+            split_line = lines[i].split(',')
+            _h.append(float(split_line[0]))
+            _hr.append(_h[0])
+            _m.append(float(split_line[1]))
+            if self.temperature is not None:
+                _T.append(float(split_line[2]))
+            i += 1
+
+        self.h.append(_h)
+        self.hr.append(_hr)
+        self.m.append(_m)
+        if self.temperature is not None:
+            self.temperature.append(_T)
+
+        return len(_h)
+
+    def _extract_drift_point(self, line):
+        """Extract the drift point from the specified input line. Only records the moment,
+        not the measurement field from the drift point (the field isn't used in any drift correction).
+        Appends the drift point to self.drift_points.
+
+        Parameters
+        ----------
+        line : str
+            Line from data file which contains the drift point.
+        """
+
+        self.drift_points.append(float(line.split(sep=',')[1]))
+        return
 
 
 class ForcError(Exception):
