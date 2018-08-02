@@ -71,8 +71,8 @@ class PMCForc(ForcBase):
         self._hr_max = np.nan
         self._m_min = np.nan
         self._m_max = np.nan
-        self._T_min = np.nan
-        self._T_max = np.nan
+        self._temperature_min = np.nan
+        self._temperature_max = np.nan
 
         if all([item is not None for item in (h, hr, m)]):
             self.h = None             # Field
@@ -83,7 +83,7 @@ class PMCForc(ForcBase):
 
             self._from_input_arrays(h, hr, m, T, rho)
             if step is not None:
-                warnings.warn('''Step was specified during forc instantiation, but numpy arrays were also given. 
+                warnings.warn('''Step was specified during forc instantiation, but numpy arrays were also given.
                                  Using calculated step from numpy arrays.''')
             self.step = self._determine_step()
 
@@ -163,11 +163,11 @@ class PMCForc(ForcBase):
         self._m_max = np.nanmax(self.m)
 
         if self.temperature is None or np.all(np.isnan(self.temperature)):
-            self._T_min = np.nan
-            self._T_max = np.nan
+            self._temperature_min = np.nan
+            self._temperature_max = np.nan
         else:
-            self._T_min = np.nanmin(self.temperature)
-            self._T_max = np.nanmax(self.temperature)
+            self._temperature_min = np.nanmin(self.temperature)
+            self._temperature_max = np.nanmax(self.temperature)
 
         return
 
@@ -218,8 +218,11 @@ class PMCForc(ForcBase):
         if method == 'truncate':
             return
 
-        h_extend, hr_extend = np.meshgrid(np.arange(self._h_min - 2*sf*self.step, self._h_min, self.step),
-                                          np.arange(self._hr_min, self._hr_max+self.step, self.step))
+        # h_extend, hr_extend = np.meshgrid(np.arange(self._h_min - (2*sf+1)*self.step, self._h_min, self.step),
+        #                                   np.arange(self._hr_min, self._hr_max+self.step, self.step))
+
+        h_extend, hr_extend = np.meshgrid(np.linspace(self._h_min - (2*sf+1)*self.step, self._h_min, 2*sf+1),
+                                          self.hr[:, 0])
 
         self.h = np.concatenate((h_extend, self.h), axis=1)
         self.hr = np.concatenate((hr_extend, self.hr), axis=1)
@@ -495,7 +498,7 @@ class PMCImporter:
 
         i = self._find_first_data_point(lines)
         if self._lines_have_temperature(lines[i]):
-            self._T = []
+            self.temperature = []
 
         if self._has_drift_points(lines):
             while i < len(lines) and lines[i][0] in ['+', '-']:
@@ -551,7 +554,7 @@ class PMCImporter:
             Number of lines extracted
         """
 
-        _h, _m, _hr, _T = [], [], [], []
+        _h, _m, _hr, _temperature = [], [], [], []
         i = 0
 
         while lines[i][0] in ['+', '-']:
@@ -560,14 +563,14 @@ class PMCImporter:
             _hr.append(_h[0])
             _m.append(float(split_line[1]))
             if self.temperature is not None:
-                _T.append(float(split_line[2]))
+                _temperature.append(float(split_line[2]))
             i += 1
 
         self.h.append(_h)
         self.hr.append(_hr)
         self.m.append(_m)
         if self.temperature is not None:
-            self.temperature.append(_T)
+            self.temperature.append(_temperature)
 
         return len(_h)
 
@@ -620,8 +623,8 @@ class PMCImporter:
 
         _m = si.griddata(np.array(data_hhr), np.array(data_m), (_h, _hr), method=method)
         if self.temperature is not None:
-            data_T = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
-            self.temperature = si.griddata(np.array(data_hhr), np.array(data_T), (_h, _hr), method=method)
+            data_temperature = [self.temperature[i][j] for i in range(len(self.h)) for j in range(len(self.h[i]))]
+            self.temperature = si.griddata(np.array(data_hhr), np.array(data_temperature), (_h, _hr), method=method)
 
         _m[_h < _hr] = np.nan
 
@@ -633,7 +636,7 @@ class PMCImporter:
 
     def _drift_correction(self, radius=4, density=3):
         """Apply a drift correction to the magnetization data.
-        
+
         Parameters
         ----------
         radius : int, optional
@@ -641,9 +644,8 @@ class PMCImporter:
         density : int, optional
             Interpolation skips over every _density_ number of points. Increase this number to avoid overfitting.
             (the default is 3)
-        
-        """
 
+        """
 
         kernel_size = 2*radius+1
         kernel = np.ones(kernel_size)/kernel_size
