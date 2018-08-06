@@ -103,15 +103,15 @@ class PMCForc(ForcBase):
 
         return
 
-    def _from_input_arrays(self, h, hr, m, T, rho):
+    def _from_input_arrays(self, h, hr, m, temperature, rho):
         if all([isinstance(item, np.ndarray) for item in (h, hr, m)]):
             self.h = h
             self.hr = hr
             self.m = m
 
             if isinstance(T, np.ndarray):
-                self.temperature = T
-            elif T is not None:
+                self.temperature = temperature
+            elif temperature is not None:
                 raise IOError('Invalid input type for T: {}'.format(type(T)))
 
             if isinstance(rho, np.ndarray):

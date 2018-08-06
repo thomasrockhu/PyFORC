@@ -169,7 +169,10 @@ def heat_map(ax, forc, data_str, mask, coordinates, interpolation='nearest', cma
     """
 
     ax.clear()
-    data = forc.get_masked(forc.get_data(data_str), mask)
+    _z_data = forc.get_data(data_str)
+    if _z_data is None:
+        return
+    data = forc.get_masked(_z_data, mask)
     vmin, vmax = symmetrize_bounds(np.nanmin(data), np.nanmax(data))
     im = ax.imshow(data,
                    extent=forc.get_extent('hhr'),
@@ -212,7 +215,10 @@ def contour_map(ax, forc, data_str, mask, coordinates, interpolation='nearest', 
     """
 
     ax.clear()
-    data = forc.get_masked(forc.get_data(data_str), mask)
+    _z_data = forc.get_data(data_str)
+    if _z_data is None:
+        return
+    data = forc.get_masked(_z_data, mask)
     vmin, vmax = symmetrize_bounds(np.nanmin(data), np.nanmax(data))
     im = ax.contourf(data,
                      extent=forc.get_extent('hhr'),
@@ -258,7 +264,10 @@ def contour_levels(ax, forc, data_str, mask, coordinates, levels=None):
     else:
         raise ValueError('Invalid coordinates type.')
 
-    ax.contour(forc.get_masked(forc.get_data(data_str), mask),
+    _z_data = forc.get_data(data_str)
+    if _z_data is None:
+        return
+    ax.contour(forc.get_masked(_z_data, mask),
                extent=forc.get_extent('hhr'),
                origin='lower',
                levels=levels,
@@ -397,7 +406,10 @@ def map_into_curves(ax, forc, data_str, mask, interpolation=None, cmap='RdBu_r')
     ax.clear()
     _h = forc.h.ravel()
     _m = forc.get_masked(forc.m, mask=mask).ravel()
-    _z = forc.get_masked(forc.get_data(data_str), mask=mask).ravel()
+    _z_data = forc.get_data(data_str)
+    if _z_data is None:
+        return
+    _z = forc.get_masked(_z_data, mask=mask).ravel()
 
     # The sum of a nan and anything is a nan. This masks all nan elements across all three arrays.
     indices_non_nan = np.logical_not(np.isnan(_h+_m+_z))
