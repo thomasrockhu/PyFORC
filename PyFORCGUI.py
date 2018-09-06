@@ -125,7 +125,7 @@ class PyFORCGUI(PyFORCGUIBase.Ui_MainWindow, QtWidgets.QMainWindow):
     def import_file(self):
         path = QtWidgets.QFileDialog.getOpenFileName(self, 'Choose a data file:', './test_data/')[0]
         if pathlib.Path(path).is_file():
-            self.append_job(job=[Forc.PMCForc,
+            self.append_job(job=[Forc.UniformForc,
                                  list(),
                                  {'path': path,
                                   'step': None if self.f_step_auto.isChecked() else self.f_step_manual.value(),
@@ -148,12 +148,12 @@ class PyFORCGUI(PyFORCGUIBase.Ui_MainWindow, QtWidgets.QMainWindow):
                                                'Manual slope correction value must be a float!')
                 return
 
-            job = [Forc.PMCForc.slope_correction, None, {'value': value}]
+            job = [Forc.UniformForc.slope_correction, None, {'value': value}]
             text = 'Slope correction: manual'
 
         else:
             if self.f_slope_h_sat.text() == '':
-                job = [Forc.PMCForc.slope_correction, None, dict()]
+                job = [Forc.UniformForc.slope_correction, None, dict()]
                 text = 'Slope correction: auto'
 
             else:
@@ -166,7 +166,7 @@ class PyFORCGUI(PyFORCGUIBase.Ui_MainWindow, QtWidgets.QMainWindow):
                     return
 
                 h_sat = self.f_slope_h_sat.text()
-                job = [Forc.PMCForc.slope_correction,
+                job = [Forc.UniformForc.slope_correction,
                        None,
                        {'h_sat': None if self.f_slope_h_sat.text() else float(self.f_slope_h_sat.text())}]
                 text = 'Slope correction: h_sat = {}'.format(h_sat)
@@ -176,7 +176,7 @@ class PyFORCGUI(PyFORCGUIBase.Ui_MainWindow, QtWidgets.QMainWindow):
         return
 
     def normalize(self):
-        self.append_job(job=[Forc.PMCForc.normalize,
+        self.append_job(job=[Forc.UniformForc.normalize,
                              None,
                              {'method': 'minmax'}],
                         text='Normalize moment')
@@ -186,7 +186,7 @@ class PyFORCGUI(PyFORCGUIBase.Ui_MainWindow, QtWidgets.QMainWindow):
         raise NotImplementedError('Gaussian filtering not implemented')
 
     def compute_forc_distribution(self):
-        self.append_job(job=[Forc.PMCForc.compute_forc_distribution,
+        self.append_job(job=[Forc.UniformForc.compute_forc_distribution,
                              None,
                              {'sf': self.f_smoothing_factor.value(),
                               'method': 'savitzky-golay',

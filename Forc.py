@@ -48,11 +48,8 @@ class ForcBase(abc.ABC):
         return
 
 
-class PMCForc(ForcBase):
-    """FORC class for PMC-formatted data. See the PMC format spec for more info. Magnetization (and, if present,
-    temperature) data is optionally drift corrected upon instantiation before being interpolated on a
-    uniform grid in (H, H_r) space.
-
+class UniformForc(ForcBase):
+    """FORC class for uniformly spaced data. See the PMC format spec for more info.
 
     Parameters
     ----------
@@ -63,7 +60,7 @@ class PMCForc(ForcBase):
     def __init__(self, path=None, step=None, method='cubic', drift=False, radius=4, density=3,
                  h=None, hr=None, m=None, T=None, rho=None):
 
-        super(PMCForc, self).__init__(None)
+        super(UniformForc, self).__init__(None)
 
         self._h_min = np.nan
         self._h_max = np.nan
@@ -88,7 +85,12 @@ class PMCForc(ForcBase):
             self.step = self._determine_step()
 
         elif path is not None:
-            data = PMCImporter(path, drift=drift, radius=radius, density=density, step=step, method=method)
+            try:
+                data = PMCImporter(path, drift=drift, radius=radius, density=density, step=step, method=method)
+            except ValueError:
+                print('Invalid data format in file. Other formats not yet supported.')
+                raise
+
             self.h = data.h
             self.hr = data.hr
             self.m = data.m
@@ -109,10 +111,10 @@ class PMCForc(ForcBase):
             self.hr = hr
             self.m = m
 
-            if isinstance(T, np.ndarray):
+            if isinstance(temperature, np.ndarray):
                 self.temperature = temperature
             elif temperature is not None:
-                raise IOError('Invalid input type for T: {}'.format(type(T)))
+                raise IOError('Invalid input type for temperature: {}'.format(type(temperature)))
 
             if isinstance(rho, np.ndarray):
                 self.rho = rho
@@ -278,7 +280,7 @@ class PMCForc(ForcBase):
         else:
             raise NotImplementedError("method {} not implemented for FORC distribution calculation".format(method))
 
-        return PMCForc(h=self.h, hr=self.hr, m=self.m, rho=rho, T=self.temperature)
+        return UniformForc(h=self.h, hr=self.hr, m=self.m, rho=rho, T=self.temperature)
 
     @classmethod
     def _extend_flat(cls, h, m):
@@ -353,7 +355,7 @@ class PMCForc(ForcBase):
                 popt, _ = so.curve_fit(util.line, h_gt_h_sat, average_m)
                 value = popt[0]
 
-        return PMCForc(h=self.h, hr=self.hr, m=self.m - (value*self.h), T=self.temperature, rho=self.rho)
+        return UniformForc(h=self.h, hr=self.hr, m=self.m - (value*self.h), T=self.temperature, rho=self.rho)
 
     def get_masked(self, data, mask):
         mask = mask is True or mask.lower() == 'h<hr'
@@ -383,11 +385,11 @@ class PMCForc(ForcBase):
 
     def normalize(self, method='minmax'):
         if method == 'minmax':
-            return PMCForc(h=self.h,
-                           hr=self.hr,
-                           m=1-2*(np.nanmax(self.m)-self.m)/(np.nanmax(self.m)-np.nanmin(self.m)),
-                           rho=self.rho,
-                           T=self.temperature)
+            return UniformForc(h=self.h,
+                               hr=self.hr,
+                               m=1-2*(np.nanmax(self.m)-self.m)/(np.nanmax(self.m)-np.nanmin(self.m)),
+                               rho=self.rho,
+                               T=self.temperature)
         else:
             raise NotImplementedError
 
@@ -405,6 +407,11 @@ class PMCForc(ForcBase):
 
 
 class PMCImporter:
+    """Helper class used for importing data from a PMC-formatted FORC data file. Called by PMCForc class.
+    Magnetization (and, if present, temperature) data is optionally drift corrected upon instantiation before
+    being interpolated on a uniform grid in (H, H_r) space.
+
+    """
 
     def __init__(self, path, drift, radius, density, step, method):
         if path is not None:
@@ -603,6 +610,15 @@ class PMCImporter:
         return np.mean([np.mean(np.diff(self.h[i], n=1)) for i in range(len(self.h))])
 
     def _interpolate(self, method='cubic'):
+        """Interpolate the datasets at equally spaced points in (H, Hr) space.
+
+        Parameters
+        ----------
+        method : str, optional
+            Method of interpolation. See documentation for scipy.interpolate.griddata.
+            (the default is 'cubic', which works well for uniformly spaced data. If it gives you problems, use linear)
+
+        """
 
         # Determine min and max values of (h, hr) from raw input lists for interpolation.
         h_min = self.h[0][0]
